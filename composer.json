@@ -1,0 +1,61 @@
+{
+    "name": "exorgroup/apex-autentica-ui",
+    "type": "laravel-package",
+    "description": "The administration screens for Apex Autentica, built on Apex UI: groups, the permission matrix and group membership",
+    "keywords": [
+        "laravel",
+        "vue",
+        "authorization",
+        "permissions",
+        "admin-ui"
+    ],
+    "homepage": "https://github.com/exorgroup/apex-autentica-ui",
+    "license": "proprietary",
+    "authors": [
+        {
+            "name": "EXOR Group",
+            "email": "support@exorgroup.com"
+        }
+    ],
+    "support": {
+        "issues": "https://github.com/exorgroup/apex-autentica-ui/issues",
+        "source": "https://github.com/exorgroup/apex-autentica-ui"
+    },
+    "require": {
+        "php": "^8.2",
+        "exorgroup/apex-autentica": "^0.1",
+        "illuminate/support": "^11.0|^12.0",
+        "laravel/framework": "^11.0|^12.0"
+    },
+    "require-dev": {
+        "orchestra/testbench": "^9.0",
+        "phpunit/phpunit": "^10.0|^11.0"
+    },
+    "suggest": {
+        "exorgroup/apex-ui": "The screens are built on Apex UI components. It is a BUILD-time dependency of the host Vue app, usually installed through npm as @exorgroup/apex-ui, so it is not required here — but the screens will not render without it."
+    },
+    "autoload": {
+        "psr-4": {
+            "Apex\\AutenticaUi\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Apex\\AutenticaUi\\Tests\\": "tests/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Apex\\AutenticaUi\\AutenticaUiServiceProvider"
+            ]
+        }
+    },
+    "config": {
+        "sort-packages": true,
+        "preferred-install": "dist",
+        "optimize-autoloader": true
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}

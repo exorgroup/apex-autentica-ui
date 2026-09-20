@@ -1,0 +1,11 @@
+APEX AUTENTICA UI — LICENCE NOT YET SUPPLIED
+
+composer.json declares this package "proprietary". The licence text itself has
+deliberately not been written or adapted here.
+
+Core's LICENSE-PRO was copied as a starting point and then removed, because its
+terms are scoped to the Pro TIER — "everything under src/Pro/" — which does not
+describe this package at all. Search-and-replacing a product name through a legal
+document produces something that reads as though it were reviewed and was not.
+
+Replace this file with LICENSE, drafted or adapted by whoever owns that decision.
