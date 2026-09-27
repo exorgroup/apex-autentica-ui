@@ -462,7 +462,9 @@ const dialogFields = computed(() => {
 const dialogSchema = computed(() => ({
     /* No "NEW GROUP" label above the title — the host's rule. */
     title: renaming.value ? 'Rename group' : 'Add group',
-    layout: 'sidebar',
+    /* `long`, not `sidebar`: one section has no side nav to show, and a sidebar modal is a
+       fixed 660px — Rename drew two fields over a screen of empty panel. */
+    layout: 'long',
     shell: 'modal',
     submitLabel: renaming.value ? 'Save' : 'Create group',
     sections: [{ id: 'details', title: 'Details', icon: 'group', columns: 2, fields: dialogFields.value }],
