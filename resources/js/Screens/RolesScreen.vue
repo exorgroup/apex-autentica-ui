@@ -716,8 +716,20 @@ const resourceCount = computed(() =>
     background: var(--admin-surface);
 }
 
-.group-item:hover { border-color: #c7d2fe; }
-.group-item.is-active { border-color: #6366f1; background: #eef2ff; }
+/* Both states were fixed indigo — `#c7d2fe` and `#eef2ff`. A light fill under a card whose
+   title is `--admin-text` means white-on-white the moment the host is in dark mode, which
+   is how the user found it. The accent is read from the host so a tenant can set its own,
+   and the tint is `--admin-hover`, which is translucent and therefore correct in both
+   themes without this package knowing which one is active. */
+.group-item:hover { border-color: var(--admin-text-muted); }
+
+.group-item.is-active {
+    border-color: var(--admin-accent, #6366f1);
+    /* A neutral `--admin-hover` tint measured 4.43:1 for the description in light mode —
+       just under AA. Mixing the accent itself gives a lighter wash (4.66:1) and makes the
+       fill agree with the border instead of merely sitting behind it. */
+    background: color-mix(in srgb, var(--admin-accent, #6366f1) 8%, transparent);
+}
 
 .group-name {
     display: flex;
