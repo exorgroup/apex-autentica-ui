@@ -23,7 +23,7 @@
     },
     "require": {
         "php": "^8.2",
-        "exorgroup/apex-autentica": "^0.2",
+        "exorgroup/apex-autentica": "^0.2|^0.3",
         "illuminate/support": "^11.0|^12.0",
         "laravel/framework": "^11.0|^12.0"
     },
