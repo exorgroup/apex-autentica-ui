@@ -94,11 +94,34 @@ class GroupMemberController extends Controller
         // looking at, and so the group's current shape is visible without searching for it.
         $memberIds = $group->users()->pluck($table . '.' . $key);
 
+        /* "In group" — the design's Everyone / In group switch (AS/007). */
+        if ($request->boolean('only_members')) {
+            $query->whereIn($table . '.' . $key, $memberIds->isEmpty() ? [0] : $memberIds->all());
+        }
+
         $users = $query
             ->orderByRaw("CASE WHEN {$table}.{$key} IN (" . ($memberIds->isEmpty() ? '0' : $memberIds->implode(',')) . ') THEN 0 ELSE 1 END')
             ->orderBy(config('autentica-ui.user.order_column', 'name'))
             ->paginate($request->integer('rows', 10))
             ->withQueryString();
+
+        /* The OTHER groups each person on this page is in — AS/007. One query for the page,
+           not one per row. */
+        $others = $users->getCollection()->isEmpty() ? collect() : Group::query()
+            ->join('au10_group_user', 'au10_group_user.group_id', '=', 'au10_groups.id')
+            ->whereIn('au10_group_user.user_id', $users->getCollection()->map->getKey()->all())
+            ->where('au10_groups.id', '!=', $group->getKey())
+            ->orderBy('au10_groups.name')
+            ->get(['au10_groups.name', 'au10_group_user.user_id'])
+            ->groupBy('user_id')
+            ->map(fn ($rows) => $rows->pluck('name')->values()->all());
+
+        /* The one person who cannot be taken out: the last member of a protected group.
+           The server refuses it regardless (`GroupAdministration`); this lets the screen
+           disable the box and say why, rather than let the click fail. */
+        $lastProtected = $this->groups->isProtected($group) && $memberIds->count() === 1
+            ? $memberIds->first()
+            : null;
 
         return response()->json([
             'users' => $users->through(fn (Model $user) => [
@@ -106,6 +129,8 @@ class GroupMemberController extends Controller
                 'name' => $this->displayName($user),
                 'email' => $user->getAttribute('email'),
                 'is_member' => $memberIds->contains($user->getKey()),
+                'other_groups' => $others[$user->getKey()] ?? [],
+                'last_protected' => $lastProtected !== null && $user->getKey() == $lastProtected,
             ]),
             'members_count' => $memberIds->count(),
         ]);

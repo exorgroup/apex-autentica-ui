@@ -1,37 +1,50 @@
 <script setup>
 /**
- * Groups & Permissions — the screen, as shipped by `exorgroup/apex-autentica-ui` (P/019).
+ * Groups & Permissions — the screen, as shipped by `exorgroup/apex-autentica-ui` (P/019),
+ * redrawn against the Claude Design at TBX's Phase AS.
  *
- * Everything host-shaped stayed behind: the layout, the page heading, and the route that
- * renders it. What is here is the screen itself, so a host supplies its own chrome and
- * gets the same matrix. TBX's `Pages/Admin/Roles/Index.vue` is that wrapper and is a
- * handful of lines; it is also the worked example for anyone else.
+ * Everything host-shaped stays behind: the layout, the page heading, the Add button's place
+ * in that heading, and the route that renders it. What is here is the screen itself, so a
+ * host supplies its own chrome and gets the same matrix. TBX's `Pages/Admin/Roles/Index.vue`
+ * is that wrapper; it calls `openCreate()`, which this component exposes, from its header.
  *
- * Phase P.
+ * ## What changed at AS, and why
  *
- * Ran as `/admin/roles-new` beside the PrimeVue screen while the two were compared; it
- * replaced that screen at promotion (§6, P/017) and this is now the only roles page.
- * TBX's `Admin/Categories/Index.vue` was the reference implementation it was written
- * against; what differs from that pattern is recorded where it differs — and a good deal
- * differs, because this is a master–detail screen rather than a table with a dialog.
+ * - **A figure band** — groups, full-access accounts, accounts in NO group (they can sign in
+ *   and do nothing), resources × actions.
+ * - **The rail** shows how much each group may do, as a bar of resources granted.
+ * - **The matrix** gained per-module boxes that tick an action across the whole module, a
+ *   tri-state All column, a resource search, collapse / expand all, a dot on each changed
+ *   row, and a save bar that says how many people the change reaches.
+ * - **The Read rule is now enforced**, not just described: ticking any action grants Read,
+ *   and clearing Read clears the row. A permission to update what you cannot see is not one.
+ * - **Members** gained an Everyone / In group switch, the other groups each person is in, a
+ *   "you", and the last administrator's box disabled with its reason — the server has always
+ *   refused that change; now the screen says so before the click.
+ * - **Add group** offers "Start from" as cards with each group's size, a live duplicate-name
+ *   check, and a warning when the copy is full access.
  *
- * Nothing imports a control. ApexUI registers the library under the `Apex` prefix at boot,
- * so the page names components and gets them.
+ * Not built, by decision: an "unlock" for the protected group. The server refuses edits to
+ * it, and a screen that offered them would only be offering a failure.
  *
- * Every visible action is gated twice: hidden here by `can()`, refused by
- * EnsureResourcePermission on the admin route group. The hidden button is a courtesy; the
- * endpoint is the gate.
+ * Every visible action is gated twice: hidden here by `can()`, refused by the host's route
+ * gate. The hidden button is a courtesy; the endpoint is the gate.
  *
+ * Nothing imports a control. ApexUI registers the library under the `Apex` prefix at boot.
  */
 import { computed, ref, watch } from 'vue';
 import { useCan } from '@apex/autentica';
 import axios from 'axios';
-import { router } from '@inertiajs/vue3';
+import { router, usePage } from '@inertiajs/vue3';
 /* Precognition's useForm, not Inertia's. It returns Inertia's form patched with
    `validate()`, and ApexForm picks the driver up by capability rather than by a prop. */
 import { useForm } from 'laravel-precognition-vue-inertia';
 import { useApexAlert } from '@exorgroup/apex-ui';
 import { useRecordActions } from '../composables/useRecordActions';
+
+/* Several root nodes, and a host that forwards every page prop (TBX's wrapper does) —
+   the ones this screen does not declare have nowhere to fall through to. */
+defineOptions({ inheritAttrs: false });
 
 const props = defineProps({
     groups: { type: Array, default: () => [] },
@@ -39,46 +52,42 @@ const props = defineProps({
     matrix: { type: Object, default: () => ({}) },
     actions: { type: Array, default: () => [] },
     rules: { type: Object, default: () => ({}) },
+    /* AS/003 — accounts in no group at all. */
+    users_without_group: { type: Number, default: 0 },
+    /* AS/006 — a line per group NAME, from the host's `autentica-ui.group_notes`. */
+    group_notes: { type: Object, default: () => ({}) },
 });
 
 const { can } = useCan();
 const { saveRecord, deleteRecord, run, working, REPORT } = useRecordActions();
-/* `notify` for a one-shot result. `run()` is confirm → progress → report around an
-   action, and a refusal that has already come back is none of those. */
 const { notify } = useApexAlert();
 
-/* Spelled once — a typo denies for ever with no error, because a resource that does not
-   exist has no permissions. The ROUTE is `roles`; the RESOURCE is `groups`. */
+/* Spelled once — a typo denies for ever with no error. The ROUTE is `roles`; the RESOURCE
+   is `groups`. */
 const RESOURCE = 'groups';
+
+/* The signed-in user, for the "you" beside their own name — Breeze's `auth.user`, if the
+   host shares it; nothing breaks if it does not. */
+const page = usePage();
+const meId = computed(() => page.props?.auth?.user?.id ?? null);
 
 const selectedId = ref(props.groups[0]?.id ?? null);
 const selected = computed(() => props.groups.find((g) => g.id === selectedId.value) ?? null);
 
-/* A group can vanish under the selection — deleted here, or by somebody else between
-   reloads. Fall back to the first rather than leaving the pane bound to a group that is
-   no longer in the list, which renders as an empty detail with no explanation. */
 watch(() => props.groups, (list) => {
     if (! list.some((g) => g.id === selectedId.value)) {
         selectedId.value = list[0]?.id ?? null;
     }
 });
 
-function select(group) {
-    selectedId.value = group.id;
-    draft.value = buildDraft(group.id);
-}
-
-/* ── the matrix ───────────────────────────────────────────────────────────
-   A working copy as a Set of letters per resource, so ticking a box is a local edit and
-   nothing reaches the server until Save. Straight from the PrimeVue screen — the storage
-   is unchanged, only what draws it. */
+/* ── the matrix: a working copy ─────────────────────────────────────────── */
 function buildDraft(groupId) {
     const current = props.matrix[groupId] ?? {};
     const out = {};
 
     props.tree.forEach((module) => {
         module.children.forEach((resource) => {
-            out[resource.identifier] = new Set((current[resource.identifier] ?? '').split(''));
+            out[resource.identifier] = new Set((current[resource.identifier] ?? '').split('').filter(Boolean));
         });
     });
 
@@ -87,55 +96,98 @@ function buildDraft(groupId) {
 
 const draft = ref(buildDraft(selectedId.value));
 
-/* A save, or somebody else's change, arrives as new props. Rebuild from them rather than
-   keeping the local copy, or the screen would go on showing an edit the server rejected. */
 watch(() => props.matrix, () => { draft.value = buildDraft(selectedId.value); });
 
 /** Whether this screen may write the matrix at all — permission AND the group's own rule. */
 const editable = computed(() => can(RESOURCE, 'update') && ! selected.value?.locked);
 
+const READ = 'r';
+
 function has(identifier, letter) {
     return draft.value[identifier]?.has(letter) ?? false;
 }
 
-function toggle(identifier, letter) {
-    if (! editable.value) return;
+/* The Read rule — AS/006. Any action implies Read; clearing Read clears the row. Applied in
+   ONE place so the box, the module column and the All column cannot disagree about it. */
+function setAction(set, letter, on) {
+    if (on) {
+        set.add(letter);
+        if (letter !== READ) set.add(READ);
+    } else if (letter === READ) {
+        set.clear();
+    } else {
+        set.delete(letter);
+    }
+}
 
-    const set = draft.value[identifier];
-    set.has(letter) ? set.delete(letter) : set.add(letter);
+function commit() {
     // Reassign so the computeds re-evaluate — a Set mutation is not reactive.
     draft.value = { ...draft.value };
+}
+
+function toggle(identifier, letter) {
+    if (! editable.value) return;
+    setAction(draft.value[identifier], letter, ! has(identifier, letter));
+    commit();
+}
+
+function rowCount(identifier) {
+    return props.actions.filter((a) => has(identifier, a)).length;
 }
 
 /** Every action on one resource, on or off together. */
 function toggleRow(identifier) {
     if (! editable.value) return;
-
     const set = draft.value[identifier];
-    const full = props.actions.every((a) => set.has(a));
-
-    props.actions.forEach((a) => (full ? set.delete(a) : set.add(a)));
-    draft.value = { ...draft.value };
+    const full = rowCount(identifier) === props.actions.length;
+    set.clear();
+    if (! full) props.actions.forEach((a) => set.add(a));
+    commit();
 }
 
-function rowIsFull(identifier) {
-    return props.actions.every((a) => has(identifier, a));
+/* A module's column: how many of its resources hold this action. */
+function moduleCount(module, letter) {
+    return (module.children ?? []).filter((r) => has(r.identifier, letter)).length;
 }
 
-const grantedCount = computed(
-    () => Object.values(draft.value).filter((set) => set.size > 0).length);
+function toggleModuleColumn(module, letter) {
+    if (! editable.value) return;
+    const all = moduleCount(module, letter) === module.children.length;
+    module.children.forEach((r) => setAction(draft.value[r.identifier], letter, ! all));
+    commit();
+}
 
-/** Unsaved work — the reason to warn before the selection moves elsewhere. */
-const dirty = computed(() => {
-    const stored = props.matrix[selectedId.value] ?? {};
+const grantedCount = computed(() => Object.values(draft.value).filter((set) => set.size > 0).length);
+const permissionCount = computed(() => Object.values(draft.value).reduce((n, set) => n + set.size, 0));
 
-    return Object.entries(draft.value).some(([identifier, set]) => {
-        const was = stored[identifier] ?? '';
-        const now = props.actions.filter((a) => set.has(a)).join('');
+/** What the server holds for one resource, for the changed-row dot and the count. */
+function stored(identifier) {
+    return [...((props.matrix[selectedId.value] ?? {})[identifier] ?? '')].sort().join('');
+}
 
-        return was.split('').sort().join('') !== now.split('').sort().join('');
-    });
-});
+function isChanged(identifier) {
+    return stored(identifier) !== [...(draft.value[identifier] ?? [])].sort().join('');
+}
+
+/** Individual boxes that differ from what is stored — the save bar's count. */
+const changeCount = computed(() => Object.keys(draft.value).reduce((n, identifier) => {
+    const was = new Set(stored(identifier).split('').filter(Boolean));
+    const now = draft.value[identifier];
+
+    return n + props.actions.filter((a) => was.has(a) !== now.has(a)).length;
+}, 0));
+
+const dirty = computed(() => changeCount.value > 0);
+
+function discard() {
+    draft.value = buildDraft(selectedId.value);
+}
+
+function select(group) {
+    if (group.id === selectedId.value) return;
+    selectedId.value = group.id;
+    draft.value = buildDraft(group.id);
+}
 
 function save() {
     if (! editable.value) return;
@@ -153,8 +205,6 @@ function save() {
             router.put(route('admin.roles.update', selected.value.id), { permissions }, {
                 preserveScroll: true,
                 onSuccess: () => { accepted = true; },
-                /* No message on failure: a refusal arrives as a flash and the server's own
-                   words are better than anything this file could guess. */
                 onFinish: () => resolve(accepted
                     ? { ok: true, title: 'Permissions saved' }
                     : { ok: false, title: 'Not saved' }),
@@ -163,95 +213,127 @@ function save() {
     });
 }
 
-/* ── the tree the table draws ─────────────────────────────────────────────
-   Modules are rows too, carrying only their name: the expander lives on the resource
-   column, and a module has nothing to tick. `key` is the resource identifier, which is
-   also what the payload is keyed by, so a row and its permissions cannot drift apart. */
-const nodes = computed(() => props.tree.map((module) => ({
-    key: `module:${module.identifier}`,
-    data: { name: module.name, identifier: module.identifier, isModule: true },
-    children: (module.children ?? []).map((resource) => ({
-        key: resource.identifier,
-        data: { name: resource.name, identifier: resource.identifier, isModule: false },
-    })),
-})));
+/* ── the tree the table draws ───────────────────────────────────────────── */
+const resourceQuery = ref('');
 
-/* Everything open. The screen it replaces was one flat table with module headings, so
-   collapsed modules would hide rows that used to be in front of you. */
+const nodes = computed(() => {
+    const q = resourceQuery.value.trim().toLowerCase();
+
+    return props.tree.map((module) => {
+        const children = (module.children ?? []).filter((r) => ! q
+            || `${r.name} ${r.identifier}`.toLowerCase().includes(q));
+
+        return {
+            key: `module:${module.identifier}`,
+            data: { name: module.name, identifier: module.identifier, isModule: true, module },
+            children: children.map((resource) => ({
+                key: resource.identifier,
+                data: { name: resource.name, identifier: resource.identifier, isModule: false },
+            })),
+        };
+    }).filter((n) => n.children.length);
+});
+
 const expandedKeys = ref({});
-watch(nodes, (list) => {
-    expandedKeys.value = Object.fromEntries(list.map((n) => [n.key, true]));
-}, { immediate: true });
+const openAll = () => { expandedKeys.value = Object.fromEntries(nodes.value.map((n) => [n.key, true])); };
+watch(() => props.tree, openAll, { immediate: true });
+/* A search opens everything it finds, or a match inside a closed module is a match nobody sees. */
+watch(resourceQuery, (q) => { if (q) openAll(); });
+
+const allOpen = computed(() => nodes.value.every((n) => expandedKeys.value[n.key]));
+
+function toggleAllOpen() {
+    if (allOpen.value) expandedKeys.value = {};
+    else openAll();
+}
 
 /** Full names for the column headers; the letters are what travels on the wire. */
 const ACTION_LABELS = {
     c: 'Create', r: 'Read', u: 'Update', d: 'Delete', p: 'Print', h: 'History',
 };
 
+/* The two actions worth a second thought, said on their headers. */
+const ACTION_RISK = {
+    d: 'Deletes records',
+    h: 'Sees who changed what',
+};
+
 const columns = computed(() => [
     { field: 'name', header: 'Resource', expander: true },
-    ...props.actions.map((a) => ({ field: a, header: ACTION_LABELS[a] ?? a, align: 'center' })),
-    { field: '__all', header: '', align: 'center' },
+    ...props.actions.map((a) => ({ field: a, header: ACTION_LABELS[a] ?? a, align: 'center', width: '4.25rem' })),
+    { field: '__all', header: 'All', align: 'center', width: '3.5rem' },
 ]);
+
+/** Every resource the tree carries, flattened — the matrix's row count. */
+const resourceCount = computed(() => props.tree.reduce((n, module) => n + (module.children?.length ?? 0), 0));
+
+/* ── the rail and the band ──────────────────────────────────────────────── */
+/** Resources a group holds anything on, from the STORED matrix — counted against the tree,
+    because the matrix can still carry rows for resources the tree no longer lists. */
+const identifiers = computed(() => props.tree.flatMap((module) => (module.children ?? []).map((r) => r.identifier)));
+const grantedFor = (group) => {
+    const held = props.matrix[group.id] ?? {};
+    return identifiers.value.filter((id) => (held[id] ?? '').length).length;
+};
+
+const protectedGroup = computed(() => props.groups.find((g) => g.locked) ?? null);
+
+const kpis = computed(() => {
+    const empty = props.groups.filter((g) => ! g.users_count).length;
+
+    return [
+        { label: 'Groups', value: props.groups.length, sub: `${empty} with no members` },
+        /* No colour, whatever the count — the user's call at AS. */
+        { label: protectedGroup.value?.name ?? 'Administrators', value: protectedGroup.value?.users_count ?? 0, sub: 'Full-access accounts' },
+        {
+            label: 'Users without a group',
+            value: props.users_without_group,
+            sub: props.users_without_group ? "Can sign in but can't do anything" : 'Everyone is assigned',
+            warn: props.users_without_group > 0,
+        },
+        { label: 'Resources', value: resourceCount.value, sub: `× ${props.actions.length} actions each` },
+    ];
+});
 
 function remove(group) {
     deleteRecord(route('admin.roles.destroy', group.id), {
         confirm: {
             tone: 'danger',
             header: 'Delete group',
-            /* The count is in the question because it is the consequence: the members are
-               detached as part of the delete, not as a precondition for it, so this is the
-               only place anybody is told how many people lose the group. */
             message: group.users_count > 0
                 ? `Delete “${group.name}”? ${group.users_count} ${group.users_count === 1 ? 'user' : 'users'} will be removed from it.`
                 : `Delete “${group.name}”?`,
             confirmText: 'Delete',
-            /* `confirm()` defaults `cancelText` to null, so the question renders with one
-               button and no way to answer "no" except the scrim. */
             cancelText: 'Cancel',
         },
     });
 }
 
-/* ── members ──────────────────────────────────────────────────────────────
-   These two endpoints stay JSON, and that is a deliberate exception to "RESTful
-   controllers served through Inertia" — the same exception Phase O made for
-   `SecurityLogController::forUser()`, for a sharper reason here.
-
-   An Inertia visit replaces the whole props object, so `props.matrix` arrives as a new
-   reference and the watcher above rebuilds the draft. Paging the members list would
-   therefore throw away unsaved permission edits on the other tab, silently. Fetching the
-   list on its own keeps the two halves of this screen independent, which is what they are.
-
-   No SORTING is offered, exactly as before. The order is a rule rather than a preference:
-   members first, then by name, so ticking somebody does not make them vanish off the page
-   you are looking at. A sortable column would either break that or quietly ignore the
-   click. The workflow's sort-whitelist rule bites when sorting is offered; it is not. */
+/* ── members ────────────────────────────────────────────────────────────────
+   JSON, deliberately: an Inertia visit replaces every prop, so paging the members list
+   through Inertia would rebuild the permission draft on the other tab and throw unsaved
+   edits away. The order is the server's rule — members first, then by name. */
 const TAB_PERMISSIONS = 'permissions';
 const TAB_MEMBERS = 'members';
 
 const tab = ref(TAB_PERMISSIONS);
 
+const tabOptions = computed(() => [
+    { value: TAB_PERMISSIONS, label: 'Permissions' },
+    { value: TAB_MEMBERS, label: `Members · ${selected.value?.users_count ?? 0}` },
+]);
+
 const members = ref({ data: [], total: 0, current_page: 1, per_page: 10 });
 const membersLoading = ref(false);
 const memberSearch = ref('');
+const onlyMembers = ref(false);
 const togglingId = ref(null);
 let searchTimer = null;
 
-/* Bumped on every load, and used in each tick's `:key`.
-
-   Vue patches a DOM property only when the bound value CHANGES. A refused toggle leaves
-   `is_member` exactly as it was, so re-fetching the list is not enough on its own: the
-   vnode prop is identical, Vue skips the patch, and the box the browser unchecked on
-   click stays unchecked beside a count that still says the person is a member. Changing
-   the key remounts the control, which is the one thing that reliably puts the DOM back
-   in step with the value it is supposed to be showing. */
+/* Bumped on every load and used in each tick's `:key`: a refused toggle leaves `is_member`
+   unchanged, Vue skips the patch, and the box the browser flipped stays flipped. A new key
+   remounts it from the value. */
 const memberEpoch = ref(0);
-
-const tabs = computed(() => [
-    { value: TAB_PERMISSIONS, label: 'Permissions' },
-    { value: TAB_MEMBERS, label: 'Members', badge: selected.value?.users_count ?? 0 },
-]);
 
 async function loadMembers(page = 1) {
     if (! selected.value) return;
@@ -260,7 +342,8 @@ async function loadMembers(page = 1) {
     try {
         const url = route('admin.roles.members.index', selected.value.id)
             + `?page=${page}&rows=${members.value.per_page}`
-            + (memberSearch.value ? `&search=${encodeURIComponent(memberSearch.value)}` : '');
+            + (memberSearch.value ? `&search=${encodeURIComponent(memberSearch.value)}` : '')
+            + (onlyMembers.value ? '&only_members=1' : '');
 
         const { data } = await axios.get(url);
         members.value = data.users;
@@ -270,15 +353,15 @@ async function loadMembers(page = 1) {
     }
 }
 
-/* Typing should not fire a request per keystroke, and the old page debounced the same
-   way. 300ms is long enough to finish a word and short enough not to feel stuck. */
 function onSearch() {
     clearTimeout(searchTimer);
     searchTimer = setTimeout(() => loadMembers(1), 300);
 }
 
+watch(onlyMembers, () => loadMembers(1));
+
 async function toggleMember(user, shouldBeMember) {
-    if (! can(RESOURCE, 'update')) return;
+    if (! can(RESOURCE, 'update') || user.last_protected) return;
 
     togglingId.value = user.id;
     try {
@@ -288,33 +371,21 @@ async function toggleMember(user, shouldBeMember) {
         );
 
         user.is_member = data.is_member;
-        /* The count lives on the group in the rail, and the server is the one that knows
-           it — a local increment would drift the moment two people edit at once. */
         if (selected.value) selected.value.users_count = data.members_count;
+        /* Membership changed who is "last" — re-read the page so the disabled box moves. */
+        await loadMembers(members.value.current_page);
     } catch (e) {
-        /* 422 is the last-administrator refusal, and the server's words are the right
-           ones. Anything else is unexpected and says so. */
         notify({
             ...REPORT,
             tone: 'danger',
             title: e?.response?.data?.message ?? 'Could not change membership',
         });
-
-        /* Then put the list back the way the SERVER has it. Without this the tick stays
-           where the click left it: `row.is_member` never changed, so nothing re-renders,
-           and the box sits unticked beside a rail still reading "1 user". A refusal that
-           leaves the screen showing the thing it refused is worse than no message at all.
-
-           A refetch rather than flipping the flag back, because the reason for a refusal
-           may be something else having changed — the server's copy is the answer either
-           way, and this list is one small page. */
         await loadMembers(members.value.current_page);
     } finally {
         togglingId.value = null;
     }
 }
 
-/* Switching group or tab reloads rather than showing the previous group's people. */
 watch([selectedId, tab], ([, which]) => {
     if (which === TAB_MEMBERS) {
         memberSearch.value = '';
@@ -322,23 +393,25 @@ watch([selectedId, tab], ([, which]) => {
     }
 });
 
-/* ── the create / rename dialog ───────────────────────────────────────────
-   Inertia's useForm holds the values; ApexForm reads and writes THROUGH it and keeps no
-   copy. A 422's errors land on the fields with no work here. */
-const BLANK = { name: '', description: '', copy_from_group_id: null };
+const initials = (name) => String(name ?? '').split(/\s+/).filter(Boolean).map((w) => w[0]).join('').slice(0, 2).toUpperCase() || '?';
+
+const memberColumns = [
+    { field: 'is_member', header: 'In group', align: 'center', width: '6rem' },
+    { field: 'name', header: 'Name' },
+    { field: 'email', header: 'Email' },
+    { field: 'other_groups', header: 'Other groups' },
+];
+
+const memberRowClass = (row) => (row.is_member ? 'is-member' : '');
+
+/* ── the create / rename dialog ─────────────────────────────────────────── */
+/* `copy_from_group_id` is 0 for "No permissions" on the cards — a radio needs a real value —
+   and goes to the server as null. */
+const BLANK = { name: '', description: '', copy_from_group_id: 0 };
 
 const dialogOpen = ref(false);
 const renaming = ref(null);
 
-/* ONE form, created once, with the method and url as FUNCTIONS. Both are resolved per
-   request rather than at creation, so the same form validates against the right endpoint
-   in either mode — and that matters for exactly one rule here:
-   `unique:au10_groups,name,{id}` excludes the group being renamed, so validating a rename
-   against the STORE url would report the group's own name as taken.
-
-   Created here rather than per dialog: `useForm` ends with a `watchEffect`, which outside
-   a component belongs to no scope and is never disposed. One per open would leak an
-   effect each time. */
 const form = useForm(
     () => (renaming.value ? 'patch' : 'post'),
     () => (renaming.value
@@ -347,31 +420,38 @@ const form = useForm(
     { ...BLANK },
 );
 
-/** Every other group — what a new one may copy its permissions from. */
-const copyOptions = computed(() => props.groups.map((g) => ({
-    value: g.id,
-    label: g.name,
-})));
+/* AS/008 — the cards: "No permissions", then every group with how much it holds. */
+const startFromOptions = computed(() => [
+    { value: 0, label: 'No permissions', help: 'Blank' },
+    ...props.groups.map((g) => ({ value: g.id, label: g.name, help: `${grantedFor(g)} resources` })),
+]);
+
+/* The same test the server's `unique` makes, run against the groups already on screen so
+   the clash is said while typing. The server still decides. */
+const nameClash = computed(() => {
+    const name = String(form.name ?? '').trim().toLowerCase();
+
+    return !! name && props.groups.some((g) => g.name.toLowerCase() === name && g.id !== renaming.value?.id);
+});
+
+const copyingProtected = computed(() => !! props.groups.find((g) => g.id === form.copy_from_group_id)?.locked);
 
 const dialogFields = computed(() => {
     const fields = [
         { key: 'name', label: 'Name', type: 'text', rules: props.rules.name, span: 2, placeholder: 'e.g. Box Office' },
-        { key: 'description', label: 'Description', type: 'textarea', rules: props.rules.description, span: 2, rows: 2,
-          help: 'What this group is for.' },
+        { key: 'description', label: 'Description', type: 'textarea', rules: props.rules.description, span: 2, rows: 3,
+          placeholder: 'e.g. Sells and reprints tickets at the venue', help: 'What this group is for.' },
     ];
 
-    /* Create only. The server agrees rather than merely tolerating it: GroupRequest makes
-       the key `prohibited` once a group is bound, so a rename cannot smuggle a copy. */
+    /* Create only. GroupRequest makes the key `prohibited` once a group is bound. */
     if (! renaming.value) {
         fields.push({
             key: 'copy_from_group_id',
-            label: 'Copy permissions from',
-            type: 'select',
-            rules: props.rules.copy_from_group_id,
-            options: copyOptions.value,
-            clearable: true,
+            label: 'Start from',
+            type: 'cards',
+            options: startFromOptions.value,
             span: 2,
-            placeholder: 'Start with no permissions',
+            props: { columns: 3 },
             help: 'A copy taken now, not a link — later changes to that group do not follow.',
         });
     }
@@ -379,13 +459,12 @@ const dialogFields = computed(() => {
     return fields;
 });
 
-/* `layout: 'sidebar'`, one section. The rail only draws with more than one section, so
-   this renders as a plain panel — which is what the workflow says to write anyway: do not
-   invent a second section to make the nav appear. */
 const dialogSchema = computed(() => ({
-    title: renaming.value ? 'Rename Group' : 'Add Group',
+    /* No "NEW GROUP" label above the title — the host's rule. */
+    title: renaming.value ? 'Rename group' : 'Add group',
     layout: 'sidebar',
     shell: 'modal',
+    submitLabel: renaming.value ? 'Save' : 'Create group',
     sections: [{ id: 'details', title: 'Details', icon: 'group', columns: 2, fields: dialogFields.value }],
 }));
 
@@ -399,8 +478,6 @@ function openCreate() {
 
 function openRename(group) {
     renaming.value = group;
-    /* `defaults()` then `reset()`, so Cancel and a failed save both return to the group as
-       it was rather than to an empty form. */
     form.defaults({ ...BLANK, name: group.name, description: group.description ?? '' });
     form.reset();
     form.clearErrors();
@@ -408,6 +485,7 @@ function openRename(group) {
 }
 
 function saveGroup() {
+    if (nameClash.value) return;
     const group = renaming.value;
 
     saveRecord(
@@ -415,51 +493,33 @@ function saveGroup() {
         group ? route('admin.roles.rename', group.id) : route('admin.roles.store'),
         {
             method: group ? 'patch' : 'post',
-            /* Closes the moment the server accepts, not when the report is dismissed —
-               leaving the form up behind a "Record saved" reads as though it had not. */
+            transform: (data) => (group
+                ? { name: data.name, description: data.description }
+                : { ...data, copy_from_group_id: data.copy_from_group_id || null }),
             onSuccess: () => { dialogOpen.value = false; },
         },
     );
 }
 
-const memberColumns = [
-    { field: 'is_member', header: 'In group', align: 'center' },
-    { field: 'name', header: 'Name' },
-    { field: 'email', header: 'Email' },
-];
-
-/** Every resource the tree carries, flattened — the matrix's row count. */
-const resourceCount = computed(() =>
-    props.tree.reduce((n, module) => n + (module.children?.length ?? 0), 0));
+/* The host's header carries Add group; it calls this. */
+defineExpose({ openCreate });
 </script>
 
 <template>
+    <!-- ═══ The figures — AS/003 ═══ -->
+    <div class="ar-kpis">
+        <div v-for="k in kpis" :key="k.label" class="admin-card ar-kpi">
+            <span class="ar-kpi__label">{{ k.label }}</span>
+            <span class="ar-kpi__value" :class="{ 'ar-kpi__value--warn': k.warn }">{{ k.value }}</span>
+            <span class="ar-kpi__sub">{{ k.sub }}</span>
+        </div>
+    </div>
+
     <div class="perm-layout">
-        <!-- ═══ The rail ═══ -->
-        <aside class="admin-card group-list">
-            <div class="group-list-head">
-                <h2 class="panel-title">Groups</h2>
-
-                <!-- `success` and "Add X", like the add button on every other migrated
-                     screen — Add Post, Add Category, Add Entity. This said "New Group" in
-                     `primary`, the only place in the admin that added a record with a blue
-                     button and the only one that called it "new". -->
-                <ApexButton
-                    v-if="can(RESOURCE, 'create')"
-                    v-apex-ripple
-                    label="Add Group"
-                    icon="add"
-                    severity="success"
-                    size="sm"
-                    @click="openCreate"
-                />
-            </div>
-
-            <!-- A div with the button role, not a <button>: the row carries Rename and
-                 Delete inside it, and a button inside a button is invalid HTML — the
-                 browser closes the outer one early and the actions fall out of the row.
-                 The old page used a bare clickable div, which was legal and unreachable by
-                 keyboard; role + tabindex + the two keys it implies is both. -->
+        <!-- ═══ The rail — AS/004 ═══ -->
+        <aside class="group-list">
+            <!-- A div with the button role, not a <button>: the card carries Rename and
+                 Delete inside it, and a button inside a button is invalid HTML. -->
             <div
                 v-for="group in groups"
                 :key="group.id"
@@ -472,43 +532,43 @@ const resourceCount = computed(() =>
                 @keydown.enter.prevent="select(group)"
                 @keydown.space.prevent="select(group)"
             >
-                <span class="group-name">
-                    {{ group.name }}
-                    <ApexIcon
-                        v-if="group.locked"
-                        name="lock"
-                        :size="14"
-                        class="group-lock"
-                        label="Protected: this group cannot be renamed or deleted"
-                    />
-                </span>
-                <span class="group-meta">
-                    {{ group.users_count }} {{ group.users_count === 1 ? 'user' : 'users' }}
+                <span class="group-top">
+                    <span class="group-name">
+                        {{ group.name }}
+                        <ApexIcon
+                            v-if="group.locked"
+                            name="lock"
+                            :size="13"
+                            class="group-lock"
+                            label="Protected: this group cannot be renamed, deleted or edited"
+                        />
+                    </span>
+                    <span class="group-meta">{{ group.users_count }} {{ group.users_count === 1 ? 'user' : 'users' }}</span>
                 </span>
                 <span v-if="group.description" class="group-desc">{{ group.description }}</span>
+                <span class="group-bar" :aria-label="`${grantedFor(group)} of ${resourceCount} resources`">
+                    <span class="group-bar__track">
+                        <span class="group-bar__fill" :style="{ width: `${resourceCount ? (grantedFor(group) / resourceCount) * 100 : 0}%` }" />
+                    </span>
+                    <span class="group-bar__n">{{ grantedFor(group) }}/{{ resourceCount }}</span>
+                </span>
 
-                <!-- A protected group has no actions at all. The server refuses both anyway
-                     (GroupAdministration::assertNotProtected), so this is the courtesy half
-                     of the same rule: `isAdmin()` matches by NAME, so a rename turns every
-                     administrator check false, and a delete leaves nobody able to get back in. -->
+                <!-- A protected group has no actions at all — the server refuses both. -->
                 <span v-if="!group.locked" class="group-actions">
                     <ApexButton
                         v-if="can(RESOURCE, 'update')"
                         v-apex-tooltip.top="'Rename'"
-                        v-apex-ripple
                         icon="edit"
                         icon-only
                         label="Rename"
                         variant="text"
                         size="sm"
                         rounded
-                        severity="success"
                         @click.stop="openRename(group)"
                     />
                     <ApexButton
                         v-if="can(RESOURCE, 'delete')"
                         v-apex-tooltip.top="'Delete'"
-                        v-apex-ripple
                         icon="delete"
                         icon-only
                         label="Delete"
@@ -522,122 +582,155 @@ const resourceCount = computed(() =>
             </div>
         </aside>
 
-        <!-- ═══ The detail pane — P/007 onwards ═══ -->
+        <!-- ═══ The detail pane ═══ -->
         <section class="admin-card matrix">
             <template v-if="selected">
                 <header class="matrix-head">
                     <div>
-                        <h2 class="panel-title">{{ selected.name }}</h2>
+                        <h2 class="panel-title">
+                            {{ selected.name }}
+                            <ApexBadge v-if="selected.locked" value="System" severity="secondary" />
+                        </h2>
                         <p class="panel-sub">
-                            {{ grantedCount }} of {{ resourceCount }} resources granted
+                            {{ grantedCount }} of {{ resourceCount }} resources ·
+                            {{ permissionCount }} of {{ resourceCount * actions.length }} permissions
                         </p>
                     </div>
-
-                    <!-- `success` as well: the three Settings screens all save in green,
-                         and this is the same kind of action — a page-level write, not a
-                         dialog's. Nothing in the admin saves in blue. -->
-                    <ApexButton
-                        v-if="editable && tab === TAB_PERMISSIONS"
-                        v-apex-ripple
-                        label="Save changes"
-                        icon="check"
-                        severity="success"
-                        :disabled="!dirty"
-                        @click="save"
-                    />
+                    <ApexSegmented v-model="tab" :options="tabOptions" />
                 </header>
 
-                <!-- Two questions about the same group: what it may do, and who is in it. -->
-                <ApexTabs v-model="tab" :tabs="tabs" class="role-tabs" />
-
-                <!-- ═══ Permissions ═══ -->
+                <!-- ═══ Permissions — AS/006 ═══ -->
                 <template v-if="tab === TAB_PERMISSIONS">
-                <!-- The three notices the old screen earned, in the same order. -->
-                <ApexMessage v-if="selected.locked" severity="info" :closable="false" class="notice">
-                    Administrators always holds every permission, set by <code>autentica:sync</code>.
-                    Editing it here could remove your own access to this screen, with no way back in.
-                </ApexMessage>
+                    <ApexMessage v-if="selected.locked" severity="warn" :closable="false" class="notice">
+                        {{ selected.name }} always holds every permission, set by <code>autentica:sync</code>.
+                        Editing it here could remove your own access to this screen, with no way back in.
+                    </ApexMessage>
 
-                <ApexMessage v-else-if="!can(RESOURCE, 'update')" severity="info" :closable="false" class="notice">
-                    You can view permissions but not change them.
-                </ApexMessage>
+                    <ApexMessage v-else-if="!can(RESOURCE, 'update')" severity="info" :closable="false" class="notice">
+                        You can view permissions but not change them.
+                    </ApexMessage>
 
-                <ApexMessage v-else-if="grantedCount === 0" severity="info" :closable="false" class="notice">
-                    This group holds no permissions. That is deliberate for Patrons — their
-                    access to their own orders is by ownership, not by permission.
-                </ApexMessage>
+                    <p v-if="group_notes[selected.name]" class="group-note">{{ group_notes[selected.name] }}</p>
 
-                <ApexTreeTable
-                    :value="nodes"
-                    :columns="columns"
-                    v-model:expandedKeys="expandedKeys"
-                    size="small"
-                    grid-lines="horizontal"
-                    class="matrix-table"
-                >
-                    <!-- A module row names itself and stops; there is nothing to tick on it.
-                         The resource row adds its identifier, which is what the payload is
-                         keyed by and the only way to tell two similarly named rows apart. -->
-                    <template #cell:name="{ node }">
-                        <span :class="node.data.isModule ? 'module-name' : 'resource-name'">
-                            {{ node.data.name }}
-                            <span v-if="!node.data.isModule" class="ident">{{ node.data.identifier }}</span>
-                        </span>
-                    </template>
-
-                    <template v-for="a in actions" :key="a" #[`cell:${a}`]="{ node }">
-                        <!-- No `binary` prop: a boolean modelValue IS the binary case here,
-                             unlike the PrimeVue control this replaces.
-
-                             The label is KEPT and hidden in CSS, not dropped. ApexCheckbox
-                             draws `label` beside the box whatever `labelPlacement` says —
-                             the placement governs the field wrapper, and the control's own
-                             text is always rendered — so in a 6-column grid it printed
-                             "Create on Events" in every cell. The label element wraps the
-                             input, so hiding the TEXT keeps the accessible name where a
-                             screen reader can still find it; `aria-label` on the component
-                             would land on a <label>, which names nothing. -->
-                        <ApexCheckbox
-                            v-if="!node.data.isModule"
-                            :model-value="has(node.data.identifier, a)"
-                            :disabled="!editable"
-                            :label="`${ACTION_LABELS[a] ?? a} on ${node.data.name}`"
-                            @update:model-value="toggle(node.data.identifier, a)"
+                    <div class="matrix-tools">
+                        <ApexInput
+                            v-model="resourceQuery"
+                            label="Find a resource"
+                            label-placement="hidden"
+                            placeholder="Find a resource"
+                            leading-icon="search"
+                            clearable
+                            class="matrix-find"
                         />
-                    </template>
-
-                    <template #cell:__all="{ node }">
                         <ApexButton
-                            v-if="!node.data.isModule && editable"
-                            v-apex-tooltip.top="'Every action on this resource'"
-                            :label="rowIsFull(node.data.identifier) ? 'none' : 'all'"
+                            :label="allOpen ? 'Collapse all' : 'Expand all'"
                             variant="text"
+                            severity="secondary"
                             size="sm"
-                            @click="toggleRow(node.data.identifier)"
+                            @click="toggleAllOpen"
                         />
-                    </template>
-                </ApexTreeTable>
+                        <span class="matrix-hint">Ticking any action also grants Read · clearing Read clears the row</span>
+                    </div>
+
+                    <ApexTreeTable
+                        :value="nodes"
+                        :columns="columns"
+                        v-model:expandedKeys="expandedKeys"
+                        size="small"
+                        grid-lines="horizontal"
+                        class="matrix-table"
+                        :class="{ 'is-locked': !editable }"
+                    >
+                        <!-- Delete and History say what they are on their headers. -->
+                        <template v-for="a in Object.keys(ACTION_RISK)" :key="`h-${a}`" #[`header:${a}`]="{ column }">
+                            <span v-apex-tooltip.top="ACTION_RISK[a]" class="risky">{{ column.header }}</span>
+                        </template>
+
+                        <template #cell:name="{ node }">
+                            <span v-if="node.data.isModule" class="module-name">
+                                {{ node.data.name }}
+                                <span class="ident">
+                                    {{ node.data.module.children.filter((r) => rowCount(r.identifier) > 0).length }}/{{ node.data.module.children.length }}
+                                </span>
+                            </span>
+                            <span v-else class="resource-name">
+                                <span v-if="isChanged(node.data.identifier)" class="changed-dot" title="Changed" />
+                                <span class="resource-name__text">
+                                    {{ node.data.name }}
+                                    <span class="ident">{{ node.data.identifier }}</span>
+                                </span>
+                            </span>
+                        </template>
+
+                        <template v-for="a in actions" :key="a" #[`cell:${a}`]="{ node }">
+                            <!-- A module's box ticks this action on every resource in it. -->
+                            <ApexCheckbox
+                                v-if="node.data.isModule"
+                                :model-value="moduleCount(node.data.module, a) === node.data.module.children.length"
+                                :indeterminate="moduleCount(node.data.module, a) > 0 && moduleCount(node.data.module, a) < node.data.module.children.length"
+                                :disabled="!editable"
+                                :label="`${ACTION_LABELS[a] ?? a} for all of ${node.data.name}`"
+                                class="box--module"
+                                @update:model-value="toggleModuleColumn(node.data.module, a)"
+                            />
+                            <!-- The label is kept for assistive technology and hidden in CSS:
+                                 ApexCheckbox always draws its text. -->
+                            <ApexCheckbox
+                                v-else
+                                :model-value="has(node.data.identifier, a)"
+                                :disabled="!editable"
+                                :label="`${ACTION_LABELS[a] ?? a} on ${node.data.name}`"
+                                @update:model-value="toggle(node.data.identifier, a)"
+                            />
+                        </template>
+
+                        <template #cell:__all="{ node }">
+                            <ApexCheckbox
+                                v-if="!node.data.isModule"
+                                :model-value="rowCount(node.data.identifier) === actions.length"
+                                :indeterminate="rowCount(node.data.identifier) > 0 && rowCount(node.data.identifier) < actions.length"
+                                :disabled="!editable"
+                                :label="`Every action on ${node.data.name}`"
+                                class="box--module"
+                                @update:model-value="toggleRow(node.data.identifier)"
+                            />
+                        </template>
+                    </ApexTreeTable>
+
+                    <!-- The design's save bar: only while there is something to save. -->
+                    <div v-if="editable && dirty" class="save-bar" role="status" aria-live="polite">
+                        <span class="save-bar__dot" />
+                        <span class="save-bar__text">
+                            {{ changeCount }} unsaved {{ changeCount === 1 ? 'change' : 'changes' }} ·
+                            affects {{ selected.users_count }} {{ selected.users_count === 1 ? 'user' : 'users' }} on their next page load
+                        </span>
+                        <span class="save-bar__actions">
+                            <ApexButton label="Discard" variant="text" size="sm" class="save-bar__discard" @click="discard" />
+                            <ApexButton label="Save permissions" icon="check" size="sm" @click="save" />
+                        </span>
+                    </div>
                 </template>
 
-                <!-- ═══ Members ═══ -->
+                <!-- ═══ Members — AS/007 ═══ -->
                 <template v-else>
-                    <div class="member-search">
+                    <div class="matrix-tools">
                         <ApexInput
                             v-model="memberSearch"
-                            placeholder="Search by name or email…"
-                            icon="search"
+                            placeholder="Search by name or email"
+                            leading-icon="search"
                             label="Search members"
                             label-placement="hidden"
+                            class="member-search"
                             @update:model-value="onSearch"
                         />
+                        <ApexSegmented v-model="onlyMembers" :options="[{ value: false, label: 'Everyone' }, { value: true, label: 'In group' }]" />
+                        <span class="matrix-hint">Changes save straight away</span>
                     </div>
 
                     <ApexMessage v-if="!can(RESOURCE, 'update')" severity="info" :closable="false" class="notice">
                         You can see who is in this group but not change it.
                     </ApexMessage>
 
-                    <!-- Lazy: the server pages and searches, and the order is its rule, not
-                         this table's. No sortable columns — see the note in the script. -->
                     <ApexDataTable
                         :value="members.data"
                         :columns="memberColumns"
@@ -648,20 +741,36 @@ const resourceCount = computed(() =>
                         :first="(members.current_page - 1) * members.per_page"
                         :total-records="members.total"
                         :loading="membersLoading"
+                        :row-class="memberRowClass"
                         grid-lines="horizontal"
                         hoverable
-                        empty-message="No users match that search."
+                        :empty-message="onlyMembers ? 'Nobody is in this group.' : 'No users match that search.'"
                         class="member-table"
                         @page="(e) => loadMembers(e.page + 1)"
                     >
                         <template #cell:is_member="{ row }">
-                            <ApexCheckbox
-                                :key="`${row.id}-${memberEpoch}`"
-                                :model-value="row.is_member"
-                                :disabled="!can(RESOURCE, 'update') || togglingId === row.id"
-                                :label="`${row.name} in ${selected.name}`"
-                                @update:model-value="(v) => toggleMember(row, v)"
-                            />
+                            <span v-apex-tooltip.top="row.last_protected ? `The last member of ${selected.name} cannot be removed` : null">
+                                <ApexCheckbox
+                                    :key="`${row.id}-${memberEpoch}`"
+                                    :model-value="row.is_member"
+                                    :disabled="!can(RESOURCE, 'update') || togglingId === row.id || row.last_protected"
+                                    :label="`${row.name} in ${selected.name}`"
+                                    @update:model-value="(v) => toggleMember(row, v)"
+                                />
+                            </span>
+                        </template>
+                        <template #cell:name="{ row }">
+                            <span class="member-name">
+                                <span class="member-avatar">{{ initials(row.name) }}</span>
+                                <span :class="{ 'member-name__in': row.is_member }">{{ row.name }}</span>
+                                <span v-if="row.id === meId" class="member-you">you</span>
+                            </span>
+                        </template>
+                        <template #cell:other_groups="{ row }">
+                            <span v-if="row.other_groups?.length" class="member-groups">
+                                <ApexBadge v-for="g in row.other_groups" :key="g" :value="g" severity="secondary" />
+                            </span>
+                            <span v-else class="muted">—</span>
                         </template>
                     </ApexDataTable>
                 </template>
@@ -679,101 +788,227 @@ const resourceCount = computed(() =>
         shell="modal"
         @submit="saveGroup"
         @cancel="dialogOpen = false"
-    />
+    >
+        <template #field-name="{ field, value, update, error, blur }">
+            <ApexInput
+                :model-value="value"
+                :label="field.label"
+                :placeholder="field.placeholder"
+                :error="error || (nameClash ? 'A group with this name already exists.' : undefined)"
+                required
+                @update:model-value="update"
+                @blur="blur"
+            />
+        </template>
+        <template #actions="{ cancel, submit, processing }">
+            <span class="dialog-note">
+                <template v-if="!renaming && copyingProtected">Copies full access. Trim it on the next screen.</template>
+                <template v-else-if="!renaming">You can add members after creating it.</template>
+            </span>
+            <ApexButton label="Cancel" variant="text" severity="secondary" :disabled="processing" @click="cancel" />
+            <ApexButton
+                :label="renaming ? 'Save' : 'Create group'"
+                icon="check"
+                :loading="processing"
+                :disabled="nameClash"
+                @click="submit"
+            />
+        </template>
+    </ApexForm>
 </template>
 
 <style scoped>
-/* Min-width rather than the max-width the old page used: same two shapes, written so the
-   narrow one is the base case. This screen is admin, so the patron mobile contract does
-   not govern it — but one column below 1024 and two above is the behaviour being kept. */
+/* Colours are the HOST's tokens (`--admin-*`, the kit's `--accent-*`), each with a neutral
+   fallback, so another host's theme — and its dark mode — reaches this screen untouched. */
+
+/* ── the figures ───────────────────────────────────────────────────────── */
+.ar-kpis {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr));
+    gap: var(--admin-gap, 20px);
+    margin-bottom: var(--admin-gap, 20px);
+}
+
+.ar-kpi {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    min-width: 0;
+    padding: var(--admin-pad-card, 24px);
+    margin-bottom: 0;
+}
+
+.ar-kpi__label {
+    font-size: 0.6875rem;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--admin-text-muted);
+}
+
+.ar-kpi__value {
+    font-size: clamp(24px, calc(var(--admin-kpi, 56px) * 0.7), 40px);
+    font-weight: 700;
+    letter-spacing: -0.025em;
+    line-height: 1;
+    color: var(--admin-text);
+    font-variant-numeric: tabular-nums;
+}
+
+.ar-kpi__value--warn { color: var(--accent-warning, #d97706); }
+
+.ar-kpi__sub { font-size: 0.75rem; color: var(--admin-text-muted); }
+
+/* ── layout ────────────────────────────────────────────────────────────── */
 .perm-layout {
     display: grid;
     grid-template-columns: 1fr;
-    gap: 1.5rem;
+    gap: var(--admin-gap, 20px);
     align-items: start;
 }
 
-@media (min-width: 1024px) {
-    .perm-layout {
-        grid-template-columns: 260px 1fr;
+/* Side by side from 1280. Below it the matrix — seven columns of boxes beside the resource
+   names — does not fit beside a 300px rail, and History and All were cut off at 1024; the
+   rail goes above it as a grid of cards instead. */
+@media (min-width: 768px) and (max-width: 1279.98px) {
+    /* Doubled up to outrank the base `.group-list` rule, which comes later in the file. */
+    .perm-layout .group-list {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
     }
 }
 
-.panel-title { font-size: 1rem; font-weight: 700; margin: 0; }
+@media (min-width: 1280px) {
+    .perm-layout { grid-template-columns: 300px minmax(0, 1fr); }
+
+    /* The rail stays in view while the matrix scrolls past it. */
+    .group-list {
+        position: sticky;
+        top: calc(var(--topbar-height, 64px) + 16px);
+    }
+}
+
+.panel-title {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 1rem;
+    font-weight: 700;
+    margin: 0;
+    color: var(--admin-text);
+}
+
 .panel-sub { font-size: 0.8125rem; color: var(--admin-text-muted); margin: 0.25rem 0 0; }
 
-.group-list { padding: 1rem; }
+/* ── the rail ──────────────────────────────────────────────────────────── */
+.group-list { display: flex; flex-direction: column; gap: 0.5rem; }
 
 .group-item {
-    display: block;
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
     width: 100%;
     text-align: left;
     cursor: pointer;
-    padding: 0.75rem;
-    margin-top: 0.5rem;
-    border-radius: 0.5rem;
+    padding: 0.75rem 0.875rem;
+    border-radius: 10px;
     border: 1px solid var(--admin-border);
     background: var(--admin-surface);
 }
 
-/* Both states were fixed indigo — `#c7d2fe` and `#eef2ff`. A light fill under a card whose
-   title is `--admin-text` means white-on-white the moment the host is in dark mode, which
-   is how the user found it. The accent is read from the host so a tenant can set its own,
-   and the tint is `--admin-hover`, which is translucent and therefore correct in both
-   themes without this package knowing which one is active. */
 .group-item:hover { border-color: var(--admin-text-muted); }
 
+/* The selected group keeps the accent border and its 8% wash (6f8f90a), with an inset line
+   so it reads as chosen, not merely hovered. */
 .group-item.is-active {
     border-color: var(--admin-accent, #6366f1);
-    /* A neutral `--admin-hover` tint measured 4.43:1 for the description in light mode —
-       just under AA. Mixing the accent itself gives a lighter wash (4.66:1) and makes the
-       fill agree with the border instead of merely sitting behind it. */
+    box-shadow: inset 0 0 0 1px var(--admin-accent, #6366f1);
     background: color-mix(in srgb, var(--admin-accent, #6366f1) 8%, transparent);
 }
+
+.group-top { display: flex; align-items: center; gap: 0.5rem; }
 
 .group-name {
     display: flex;
     align-items: center;
     gap: 0.375rem;
-    font-weight: 600;
-    font-size: 0.875rem;
+    font-weight: 700;
+    font-size: 0.9375rem;
     color: var(--admin-text);
+    min-width: 0;
 }
 
 .group-lock { color: var(--admin-text-muted); }
-.group-meta { display: block; font-size: 0.75rem; color: var(--admin-text-muted); margin-top: 0.125rem; }
-.group-desc { display: block; font-size: 0.75rem; color: var(--admin-text-muted); margin-top: 0.25rem; line-height: 1.3; }
+.group-meta { margin-left: auto; font-size: 0.75rem; color: var(--admin-text-muted); white-space: nowrap; }
+.group-desc { font-size: 0.75rem; color: var(--admin-text-muted); line-height: 1.45; }
 
-.group-list-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
+.group-bar { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.25rem; }
+.group-bar__track { flex: 1; height: 4px; border-radius: 2px; background: var(--admin-border); overflow: hidden; }
+.group-bar__fill { display: block; height: 100%; background: var(--admin-text); }
+.group-bar__n { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.6875rem; color: var(--admin-text-muted); }
 
-/* Row actions appear on hover so the list stays quiet when you are only reading it.
-   `:focus-within` as well as hover — keyboard users never trigger hover, and without it
-   the two buttons are reachable by tab and invisible while focused. */
-.group-actions {
-    display: flex;
-    gap: 0.25rem;
-    margin-top: 0.5rem;
-    opacity: 0;
-    transition: opacity 0.15s;
-}
+.group-actions { display: none; gap: 0.25rem; margin-top: 0.25rem; }
+.group-item.is-active .group-actions,
+.group-item:focus-within .group-actions { display: flex; }
 
-.group-item:hover .group-actions,
-.group-item:focus-within .group-actions,
-.group-item.is-active .group-actions { opacity: 1; }
+/* ── the detail ────────────────────────────────────────────────────────── */
+.matrix { padding: var(--admin-pad-card, 24px); min-width: 0; }
 
-.matrix-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
+.matrix-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
 
 .notice { margin-top: 1rem; }
 
-.role-tabs { margin-top: 1rem; }
+.group-note { margin: 1rem 0 0; font-size: 0.8125rem; color: var(--admin-text-muted); }
 
-.matrix-table { margin-top: 1rem; }
+.matrix-tools {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    margin-top: 1rem;
+}
 
-.member-search { margin-top: 1rem; max-width: 22rem; }
-.member-table { margin-top: 1rem; }
+.matrix-find { width: 14rem; }
+.member-search { width: 17rem; }
 
-/* Same treatment as the matrix: the name stays for assistive technology and comes off
-   the screen, because ApexCheckbox always draws its label. */
+.matrix-hint { margin-left: auto; font-size: 0.75rem; color: var(--admin-text-muted); }
+
+.matrix-table { margin-top: 0.75rem; }
+
+/* Locked or read-only: the boxes are shown, dimmed, and cannot be pressed. */
+.matrix-table.is-locked { opacity: 0.7; }
+
+.matrix-table :deep(tr[data-depth='0']) { background: var(--bg-subtle, var(--admin-bg)); }
+
+.module-name { display: inline-flex; align-items: baseline; gap: 0.5rem; font-weight: 700; color: var(--admin-text); }
+.resource-name { display: inline-flex; align-items: center; gap: 0.5rem; }
+
+/* Name over identifier: side by side, a long name wrapped into three lines at 1440. */
+.resource-name__text { display: flex; flex-direction: column; line-height: 1.3; }
+
+.ident {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.6875rem;
+    font-weight: 400;
+    color: var(--admin-text-muted);
+}
+
+.changed-dot {
+    flex: none;
+    width: 6px;
+    height: 6px;
+    border-radius: 3px;
+    background: var(--admin-accent, #6366f1);
+}
+
+.risky { border-bottom: 1px dotted currentColor; cursor: help; }
+
+/* A module's and a row's boxes are summaries, drawn lighter than the boxes they summarise. */
+.matrix-table :deep(.box--module .apex-cb__box) { opacity: 0.75; }
+
+/* ApexCheckbox always draws its label; the name stays for assistive technology and comes
+   off the screen, which is the only way to get a bare box in a grid cell. */
+.matrix-table :deep(.apex-cb__txt),
 .member-table :deep(.apex-cb__txt) {
     position: absolute;
     width: 1px;
@@ -786,41 +1021,61 @@ const resourceCount = computed(() =>
     border: 0;
 }
 
+.matrix-table :deep(.apex-cb),
 .member-table :deep(.apex-cb) { justify-content: center; }
 
-/* See the checkbox comment in the template: the name stays in the DOM for assistive
-   technology and comes off the screen, which is the only way to get a bare box in a
-   grid cell out of a control that always draws its label. */
-.matrix-table :deep(.apex-cb__txt) {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    padding: 0;
-    margin: -1px;
-    overflow: hidden;
-    clip-path: inset(50%);
-    white-space: nowrap;
-    border: 0;
+/* ── the save bar ──────────────────────────────────────────────────────── */
+.save-bar {
+    position: sticky;
+    bottom: 0;
+    z-index: 5;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-top: 1rem;
+    padding: 0.75rem 1rem;
+    border-radius: 12px;
+    background: var(--admin-sidebar-bg, #1a1a1a);
+    color: #fff;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18);
 }
 
-/* With the text gone the box is all there is, so centre it in the cell. */
-.matrix-table :deep(.apex-cb) { justify-content: center; }
+.save-bar__dot { width: 8px; height: 8px; border-radius: 4px; background: var(--admin-accent, #6366f1); flex: none; }
+.save-bar__text { font-size: 0.8125rem; }
+.save-bar__actions { display: flex; gap: 0.5rem; margin-left: auto; }
+.save-bar__discard { --apex-btn-label: #fff; }
 
-.module-name { font-weight: 700; color: var(--admin-text); }
+/* ── members ───────────────────────────────────────────────────────────── */
+.member-table { margin-top: 0.75rem; }
 
-.resource-name { display: inline-flex; align-items: baseline; gap: 0.5rem; }
+.member-table :deep(tr.is-member td) {
+    background: color-mix(in srgb, var(--admin-accent, #6366f1) 7%, var(--admin-surface, #fff));
+}
 
-/* The identifier is the key the payload travels under, so it earns a place beside the
-   label — two resources can read alike and never be the same row. */
-.ident {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+.member-name { display: inline-flex; align-items: center; gap: 0.5rem; }
+
+.member-avatar {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    border: 1px solid var(--admin-border);
+    background: var(--bg-subtle, var(--admin-bg));
     font-size: 0.6875rem;
-    color: var(--admin-text-muted);
+    font-weight: 700;
+    color: var(--admin-text);
+    flex: none;
 }
 
-.skeleton-note {
-    margin: 1rem 0 0;
-    font-size: 0.875rem;
-    color: var(--admin-text-muted);
-}
+.member-name__in { font-weight: 600; }
+.member-you { font-size: 0.6875rem; color: var(--admin-text-muted); }
+.member-groups { display: inline-flex; gap: 0.25rem; flex-wrap: wrap; }
+.muted { color: var(--admin-text-muted); }
+
+.dialog-note { margin-right: auto; font-size: 0.8125rem; color: var(--admin-text-muted); }
+
+.skeleton-note { margin: 1rem 0 0; font-size: 0.875rem; color: var(--admin-text-muted); }
 </style>

@@ -9,6 +9,7 @@ use Apex\Autentica\Core\Exceptions\GroupAdministrationException;
 use Apex\Autentica\Core\Models\Group;
 use Apex\Autentica\Core\Models\SystemResource;
 use Apex\Autentica\Core\Services\GroupAdministration;
+use Apex\Autentica\Core\Support\Autentica;
 use Apex\Autentica\Core\Support\PermissionMap;
 use Illuminate\Http\Request;
 use Inertia\Inertia;
@@ -87,6 +88,14 @@ class GroupPermissionController extends Controller
             'tree' => $tree,
             'matrix' => $this->groups->matrixFor($groups),
             'actions' => array_values(PermissionMap::ACTIONS),
+            /* Accounts that can sign in and are in no group — which means they can do
+               nothing. The design's third KPI; worth a number because nothing else on any
+               screen shows it. Through `Autentica::users()`, the host's user model. */
+            'users_without_group' => Autentica::users()->whereDoesntHave('groups')->count(),
+            /* A line the HOST wants under a particular group — keyed by group name, from
+               `autentica-ui.group_notes`. The package cannot know that TBX's "Patrons" reach
+               their own orders by ownership rather than permission; TBX can say so. */
+            'group_notes' => (array) config('autentica-ui.group_notes', []),
         ];
     }
 

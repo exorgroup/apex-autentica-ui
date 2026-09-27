@@ -99,4 +99,18 @@ return [
         'roles' => 'Admin/Roles/Index',
     ],
 
+    /*
+    |--------------------------------------------------------------------------
+    | Per-group notes
+    |--------------------------------------------------------------------------
+    |
+    | A line the screen shows above a group's permission matrix, keyed by the
+    | group's NAME. For the things only the host knows — that one group reaches
+    | its own records by ownership rather than by permission, say. Empty by
+    | default: the package has no groups of its own to explain.
+    |
+    */
+
+    'group_notes' => [],
+
 ];
